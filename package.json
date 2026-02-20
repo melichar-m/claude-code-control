@@ -20,6 +20,9 @@
   "engines": {
     "node": ">=14.0.0"
   },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0"
+  },
   "scripts": {
     "test": "node test.js",
     "example": "node examples/run-tests.js"

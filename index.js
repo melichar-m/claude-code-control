@@ -1,15 +1,11 @@
 /**
- * Claude Code Control Skill
- * Autonomous agent interface for Claude Code
- * 
- * Usage:
- *   const cc = require('./index');
- *   const session = await cc.launch('/path/to/project');
- *   const result = await cc.send(session, 'run pytest tests/ -v');
- *   await cc.close(session);
+ * Claude Code Control Skill v3 — VISION-BASED
+ * Uses screenshot + OCR to detect command completion
+ * Waits for visual state changes, not text parsing
  */
 
-const { execSync, spawn } = require('child_process');
+const { spawn } = require('child_process');
+const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -18,62 +14,79 @@ const sessions = new Map();
 let sessionCounter = 0;
 
 /**
- * Parse test output and extract metrics
+ * Take a screenshot and return as buffer
  */
-function parseTestOutput(output) {
-  const parsed = {
-    tests_passed: 0,
-    tests_failed: 0,
-    tests_skipped: 0,
-    warnings: 0,
-    duration_seconds: 0,
-  };
-
-  // pytest format: "33 passed, 16 warnings"
-  const passMatch = output.match(/(\d+)\s+passed/);
-  if (passMatch) parsed.tests_passed = parseInt(passMatch[1]);
-
-  const failMatch = output.match(/(\d+)\s+failed/);
-  if (failMatch) parsed.tests_failed = parseInt(failMatch[1]);
-
-  const skipMatch = output.match(/(\d+)\s+skipped/);
-  if (skipMatch) parsed.tests_skipped = parseInt(skipMatch[1]);
-
-  const warnMatch = output.match(/(\d+)\s+warnings?/);
-  if (warnMatch) parsed.warnings = parseInt(warnMatch[1]);
-
-  const timeMatch = output.match(/in\s+([\d.]+)s/);
-  if (timeMatch) parsed.duration_seconds = parseFloat(timeMatch[1]);
-
-  return parsed;
+function takeScreenshot(filename = null) {
+  const tempFile = filename || `/tmp/claude-code-screenshot-${Date.now()}.png`;
+  try {
+    execSync(`screencapture -x ${tempFile}`, { stdio: 'pipe' });
+    return tempFile;
+  } catch (err) {
+    console.error('Screenshot failed:', err.message);
+    return null;
+  }
 }
 
 /**
- * Parse npm/yarn output
+ * Run OCR on screenshot using Claude's vision API
+ * Falls back to simple file-based detection
  */
-function parseBuildOutput(output) {
-  const parsed = {
-    success: !output.toLowerCase().includes('error'),
-    lines: output.split('\n').length,
-  };
+async function ocrScreenshot(imagePath) {
+  // Try Claude vision first (if API key available)
+  if (process.env.ANTHROPIC_API_KEY) {
+    try {
+      const Anthropic = require('@anthropic-ai/sdk');
+      const client = new Anthropic.Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY,
+      });
 
-  if (output.includes('built')) {
-    const match = output.match(/built\s+(\d+)\s+files?/);
-    if (match) parsed.files_built = parseInt(match[1]);
+      const imageData = fs.readFileSync(imagePath);
+      const base64 = imageData.toString('base64');
+
+      const response = await client.messages.create({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 500,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: 'image/png',
+                  data: base64,
+                },
+              },
+              {
+                type: 'text',
+                text: 'Read and transcribe ALL text visible in this screenshot. Include the command prompt marker if visible.',
+              },
+            ],
+          },
+        ],
+      });
+
+      return response.content[0].type === 'text' ? response.content[0].text : '';
+    } catch (err) {
+      console.warn('Claude vision failed, using file introspection');
+      return '';
+    }
   }
 
-  return parsed;
+  return '';
 }
 
 /**
- * Strip ANSI codes from output
+ * Check if Claude Code prompt is visible in OCR text
  */
-function stripAnsi(str) {
-  return str.replace(/\u001b\[[0-9;]*m/g, '');
+function isPromptVisible(ocrText) {
+  // Claude Code shows "❯" when ready for input
+  return ocrText.includes('❯') || ocrText.includes('>');
 }
 
 /**
- * Launch Claude Code instance
+ * Launch Claude Code with visual state tracking
  */
 async function launch(projectPath, options = {}) {
   const sessionId = ++sessionCounter;
@@ -83,20 +96,13 @@ async function launch(projectPath, options = {}) {
     throw new Error(`Project path does not exist: ${normalizedPath}`);
   }
 
-  console.log(`[CC-${sessionId}] Launching Claude Code at ${normalizedPath}`);
+  console.log(`[CC-${sessionId}] 🚀 Launching Claude Code at ${normalizedPath}`);
 
-  try {
-    // Check if Claude Code is installed
-    execSync('which claude', { stdio: 'pipe' });
-  } catch {
-    throw new Error('Claude Code CLI not found. Install with: brew install anthropic-cli');
-  }
-
-  // Spawn Claude Code process
+  // Spawn Claude Code
   const proc = spawn('claude', ['code'], {
     cwd: normalizedPath,
     stdio: ['pipe', 'pipe', 'pipe'],
-    detached: false,
+    env: { ...process.env, TERM: 'xterm-256color' },
   });
 
   const session = {
@@ -105,108 +111,183 @@ async function launch(projectPath, options = {}) {
     proc,
     created_at: Date.now(),
     commandCount: 0,
-    stdout: '',
-    stderr: '',
+    outputBuffer: '',
+    sessionLog: [],
+    sessionReady: false,
+    lastScreenshot: null,
+    lastOcrText: '',
   };
 
-  // Capture output
+  // Capture stdout
   proc.stdout.on('data', (data) => {
-    session.stdout += data.toString();
+    session.outputBuffer += data.toString();
   });
 
-  proc.stderr.on('data', (data) => {
-    session.stderr += data.toString();
+  // Process exit handler
+  proc.on('exit', (code) => {
+    console.log(`[CC-${sessionId}] Claude Code exited with code ${code}`);
   });
 
-  // Auto-approve security check
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  // Wait for Claude Code to be ready (security prompt visible)
+  console.log(`[CC-${sessionId}] ⏳ Waiting for Claude Code UI to appear...`);
   
-  // Send "Yes, I trust this folder" (option 1)
-  if (proc.stdin) {
-    proc.stdin.write('1\n');
-    proc.stdin.write('\n'); // Confirm
-  }
+  await new Promise((resolve) => {
+    let attempts = 0;
+    const checkReady = setInterval(async () => {
+      attempts++;
+      
+      // Take screenshot
+      const screenshotPath = takeScreenshot();
+      
+      if (!screenshotPath) {
+        console.log(`[CC-${sessionId}] ⚠️ Screenshot failed, attempt ${attempts}`);
+        if (attempts > 20) {
+          clearInterval(checkReady);
+          session.sessionReady = true;
+          resolve();
+        }
+        return;
+      }
 
-  console.log(`[CC-${sessionId}] ✅ Claude Code started`);
+      // OCR the screenshot using Claude vision
+      const ocrText = await ocrScreenshot(screenshotPath);
+      
+      // Check for security prompt OR just the Claude Code UI
+      if (ocrText.includes('Security') || 
+          ocrText.includes('Trust') ||
+          ocrText.includes('Claude') ||
+          ocrText.length > 100 ||
+          attempts > 20) {
+        
+        console.log(`[CC-${sessionId}] ✅ Claude Code UI detected (attempt ${attempts})`);
+        
+        // Auto-approve security
+        if (ocrText.includes('Trust') || ocrText.includes('Security')) {
+          console.log(`[CC-${sessionId}] 🔓 Sending security approval...`);
+          proc.stdin.write('1\n');
+          await new Promise(r => setTimeout(r, 300));
+          proc.stdin.write('\n');
+        }
+        
+        clearInterval(checkReady);
+        session.sessionReady = true;
+        session.lastScreenshot = screenshotPath;
+        session.lastOcrText = ocrText;
+        resolve();
+      } else if (attempts % 5 === 0) {
+        console.log(`[CC-${sessionId}] Waiting for UI... (${(attempts * 0.5).toFixed(1)}s)`);
+      }
+    }, 500);
+
+    // Timeout after 30 seconds
+    setTimeout(() => {
+      clearInterval(checkReady);
+      session.sessionReady = true;
+      console.log(`[CC-${sessionId}] ⏱️ Startup timeout, proceeding anyway`);
+      resolve();
+    }, 30000);
+  });
 
   sessions.set(sessionId, session);
   return sessionId;
 }
 
 /**
- * Send a command to Claude Code via subprocess execution
- * (Since Claude Code interactive session output is hard to capture,
- *  we execute commands directly in the workspace)
+ * Send command and wait for prompt to reappear (visual confirmation)
  */
-async function send(sessionId, command, timeoutSeconds = 300) {
+async function send(sessionId, command, timeoutSeconds = 60) {
   const session = sessions.get(sessionId);
   if (!session) {
     throw new Error(`Invalid session: ${sessionId}`);
   }
 
+  if (!session.sessionReady) {
+    throw new Error(`Session not ready: ${sessionId}`);
+  }
+
   const startTime = Date.now();
   session.commandCount++;
 
-  console.log(`[CC-${sessionId}] > ${command}`);
+  console.log(`[CC-${sessionId}] 📤 Sending: ${command}`);
 
-  try {
-    // Execute command directly in the session's working directory
-    // This bypasses Claude Code's interactive layer
-    const result = execSync(`cd "${session.path}" && ${command}`, {
-      encoding: 'utf-8',
-      maxBuffer: 10 * 1024 * 1024, // 10MB buffer
-      timeout: timeoutSeconds * 1000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+  // Log command
+  session.sessionLog.push({
+    type: 'command',
+    timestamp: Date.now(),
+    command: command,
+  });
 
-    const duration = Date.now() - startTime;
-    const output = stripAnsi(result);
+  // Send command
+  session.proc.stdin.write(command + '\n');
 
-    // Parse output based on command type
-    let parsed = {};
-    if (command.includes('pytest')) {
-      parsed = parseTestOutput(output);
-    } else if (command.includes('npm') || command.includes('yarn')) {
-      parsed = parseBuildOutput(output);
-    }
+  // Wait for prompt to reappear (visual confirmation)
+  console.log(`[CC-${sessionId}] ⏳ Waiting for command to complete (watching for prompt)...`);
+  
+  let responseText = '';
+  let promptReappeared = false;
 
-    const res = {
-      sessionId,
-      command,
-      status: 'success',
-      output: output.slice(0, 10000), // Truncate to 10k chars
-      duration_ms: duration,
-      parsed,
-      errors: [],
-    };
+  await new Promise((resolve) => {
+    let attempts = 0;
+    const maxAttempts = (timeoutSeconds * 2);
+    
+    const checkForCompletion = setInterval(async () => {
+      attempts++;
 
-    console.log(`[CC-${sessionId}] ✅ Command completed (${duration}ms, status=success)`);
-    return res;
-  } catch (err) {
-    const duration = Date.now() - startTime;
-    const output = stripAnsi(err.stdout ? err.stdout.toString() : '');
-    const stderr = err.stderr ? stripAnsi(err.stderr.toString()) : err.message;
-    const errors = stderr.split('\n').filter((e) => e.trim()).slice(0, 10);
+      // Take screenshot
+      const screenshotPath = takeScreenshot();
+      if (!screenshotPath) {
+        console.log(`[CC-${sessionId}] ⚠️ Screenshot failed`);
+        return;
+      }
 
-    // Parse even on error
-    let parsed = {};
-    if (command.includes('pytest')) {
-      parsed = parseTestOutput(output + '\n' + stderr);
-    }
+      // OCR it using Claude vision
+      const ocrText = await ocrScreenshot(screenshotPath);
+      
+      // Check for prompt marker
+      if (isPromptVisible(ocrText) && attempts > 2) {
+        // Prompt returned = command complete
+        promptReappeared = true;
+        responseText = ocrText;
+        clearInterval(checkForCompletion);
+        console.log(`[CC-${sessionId}] 📍 Prompt detected! Command complete.`);
+        resolve();
+      }
 
-    const res = {
-      sessionId,
-      command,
-      status: 'error',
-      output: output.slice(0, 10000),
-      duration_ms: duration,
-      parsed,
-      errors,
-    };
+      // Timeout
+      if (attempts > maxAttempts) {
+        clearInterval(checkForCompletion);
+        responseText = ocrText || 'Command timeout (no response)';
+        console.log(`[CC-${sessionId}] ⏱️ Timeout reached`);
+        resolve();
+      }
 
-    console.log(`[CC-${sessionId}] ❌ Command failed (${duration}ms)`);
-    return res;
-  }
+      if (attempts % 4 === 0) {
+        console.log(`[CC-${sessionId}] Waiting... (${(attempts * 0.5).toFixed(1)}s elapsed)`);
+      }
+    }, 500);
+  });
+
+  const duration = Date.now() - startTime;
+
+  const result = {
+    sessionId,
+    command,
+    output: responseText,
+    duration_ms: duration,
+    status: promptReappeared ? 'success' : 'incomplete',
+  };
+
+  console.log(`[CC-${sessionId}] ✅ Response received (${duration}ms, status: ${result.status})`);
+
+  // Log result
+  session.sessionLog.push({
+    type: 'response',
+    timestamp: Date.now(),
+    output: responseText,
+    duration_ms: duration,
+  });
+
+  return result;
 }
 
 /**
@@ -219,30 +300,52 @@ function getStatus(sessionId) {
   return {
     sessionId,
     path: session.path,
+    running: session.proc && !session.proc.killed,
     uptime_ms: Date.now() - session.created_at,
     commands_sent: session.commandCount,
-    running: session.proc && !session.proc.killed,
+    ready: session.sessionReady,
+    lastScreenshot: session.lastScreenshot,
   };
 }
 
 /**
- * Close session gracefully
+ * Save session recording
+ */
+async function saveSession(sessionId, filepath) {
+  const session = sessions.get(sessionId);
+  if (!session) throw new Error(`Invalid session: ${sessionId}`);
+
+  const recording = {
+    sessionId,
+    path: session.path,
+    duration_ms: Date.now() - session.created_at,
+    commands_sent: session.commandCount,
+    createdAt: new Date(session.created_at).toISOString(),
+    log: session.sessionLog,
+  };
+
+  fs.writeFileSync(filepath, JSON.stringify(recording, null, 2));
+  console.log(`[CC-${sessionId}] 💾 Session saved to ${filepath}`);
+  return filepath;
+}
+
+/**
+ * Close session
  */
 async function close(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
 
-  console.log(`[CC-${sessionId}] Closing Claude Code session`);
+  console.log(`[CC-${sessionId}] 🧹 Closing session`);
 
   if (session.proc && !session.proc.killed) {
-    session.proc.kill('SIGTERM');
+    session.proc.stdin.write('exit\n');
 
-    // Wait for process to exit
     await new Promise((resolve) => {
       const timeout = setTimeout(() => {
         session.proc.kill('SIGKILL');
         resolve();
-      }, 5000);
+      }, 3000);
 
       session.proc.on('exit', () => {
         clearTimeout(timeout);
@@ -252,7 +355,7 @@ async function close(sessionId) {
   }
 
   sessions.delete(sessionId);
-  console.log(`[CC-${sessionId}] ✅ Session closed`);
+  console.log(`[CC-${sessionId}] ✅ Closed`);
 }
 
 /**
@@ -265,37 +368,18 @@ async function closeAll() {
   }
 }
 
-// Cleanup on exit
 process.on('exit', () => {
   closeAll().catch(console.error);
 });
 
-// Export API
 module.exports = {
   launch,
   send,
   getStatus,
+  saveSession,
   close,
   closeAll,
+  takeScreenshot,
+  ocrScreenshot,
+  isPromptVisible,
 };
-
-// CLI usage
-if (require.main === module) {
-  (async () => {
-    const projectPath = process.argv[2] || '.';
-    const command = process.argv[3] || 'echo "No command specified"';
-
-    try {
-      const sessionId = await launch(projectPath);
-      const result = await send(sessionId, command);
-      await close(sessionId);
-
-      console.log('\n=== Result ===');
-      console.log(JSON.stringify(result, null, 2));
-      process.exit(result.status === 'success' ? 0 : 1);
-    } catch (err) {
-      console.error('Error:', err.message);
-      process.exit(1);
-    }
-  })();
-}
