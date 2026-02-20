@@ -1,0 +1,35 @@
+{
+  "name": "claude-code-control",
+  "version": "1.0.0",
+  "description": "Autonomous agent interface for Claude Code — control code execution, run tests, and automate development workflows without manual intervention.",
+  "main": "index.js",
+  "keywords": [
+    "claude-code",
+    "automation",
+    "agent",
+    "testing",
+    "ci-cd",
+    "development",
+    "workflow"
+  ],
+  "author": "Efficacy Labs",
+  "license": "MIT",
+  "bin": {
+    "claude-code-control": "cli.js"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "scripts": {
+    "test": "node test.js",
+    "example": "node examples/run-tests.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/efficacy-labs/claude-code-control"
+  },
+  "bugs": {
+    "url": "https://github.com/efficacy-labs/claude-code-control/issues"
+  },
+  "homepage": "https://clawhub.com/efficacy-labs/claude-code-control"
+}

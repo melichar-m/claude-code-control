@@ -1,0 +1,17 @@
+node_modules/
+*.log
+.DS_Store
+dist/
+build/
+coverage/
+.env
+.env.local
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
