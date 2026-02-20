@@ -86,7 +86,7 @@ function isPromptVisible(ocrText) {
 }
 
 /**
- * Launch Claude Code with visual state tracking
+ * Launch Claude Code with authentication handling
  */
 async function launch(projectPath, options = {}) {
   const sessionId = ++sessionCounter;
@@ -114,6 +114,7 @@ async function launch(projectPath, options = {}) {
     outputBuffer: '',
     sessionLog: [],
     sessionReady: false,
+    authenticated: false,
     lastScreenshot: null,
     lastOcrText: '',
   };
@@ -128,8 +129,8 @@ async function launch(projectPath, options = {}) {
     console.log(`[CC-${sessionId}] Claude Code exited with code ${code}`);
   });
 
-  // Wait for Claude Code to be ready (security prompt visible)
-  console.log(`[CC-${sessionId}] ⏳ Waiting for Claude Code UI to appear...`);
+  // Wait for Claude Code to appear
+  console.log(`[CC-${sessionId}] ⏳ Starting Claude Code...`);
   
   await new Promise((resolve) => {
     let attempts = 0;
@@ -140,10 +141,10 @@ async function launch(projectPath, options = {}) {
       const screenshotPath = takeScreenshot();
       
       if (!screenshotPath) {
-        console.log(`[CC-${sessionId}] ⚠️ Screenshot failed, attempt ${attempts}`);
         if (attempts > 20) {
           clearInterval(checkReady);
           session.sessionReady = true;
+          session.authenticated = true;
           resolve();
         }
         return;
@@ -152,18 +153,57 @@ async function launch(projectPath, options = {}) {
       // OCR the screenshot using Claude vision
       const ocrText = await ocrScreenshot(screenshotPath);
       
-      // Check for security prompt OR just the Claude Code UI
+      // Check for authentication requirement
+      if (ocrText.includes('https://') || ocrText.includes('login') || ocrText.includes('authenticate')) {
+        console.log(`\n[CC-${sessionId}] 🔐 AUTHENTICATION REQUIRED\n`);
+        console.log(`[CC-${sessionId}] Claude Code needs you to authenticate:\n`);
+        console.log(`[CC-${sessionId}] 1. Look at the URL shown in Claude Code (visible on your screen)`);
+        console.log(`[CC-${sessionId}] 2. Visit that URL in your browser`);
+        console.log(`[CC-${sessionId}] 3. Complete authentication`);
+        console.log(`[CC-${sessionId}] 4. Return to Claude Code and press Enter when authenticated\n`);
+        
+        session.lastScreenshot = screenshotPath;
+        session.lastOcrText = ocrText;
+        
+        // Now wait for user to complete auth (they'll press Enter in Claude Code)
+        console.log(`[CC-${sessionId}] ⏳ Waiting for you to complete authentication...\n`);
+        
+        // Clear the check interval and wait for the prompt to change
+        clearInterval(checkReady);
+        
+        let authAttempts = 0;
+        const checkAuth = setInterval(async () => {
+          authAttempts++;
+          const authScreenshot = takeScreenshot();
+          if (authScreenshot) {
+            const authOcrText = await ocrScreenshot(authScreenshot);
+            
+            // When prompt appears (❯) = authenticated
+            if (authOcrText.includes('❯') || authAttempts > 120) {
+              console.log(`[CC-${sessionId}] ✅ Authentication complete!\n`);
+              clearInterval(checkAuth);
+              session.sessionReady = true;
+              session.authenticated = true;
+              resolve();
+            }
+          }
+        }, 500);
+        
+        return;
+      }
+      
+      // Check for security prompt (project trust)
       if (ocrText.includes('Security') || 
           ocrText.includes('Trust') ||
           ocrText.includes('Claude') ||
           ocrText.length > 100 ||
           attempts > 20) {
         
-        console.log(`[CC-${sessionId}] ✅ Claude Code UI detected (attempt ${attempts})`);
+        console.log(`[CC-${sessionId}] ✅ Claude Code UI detected`);
         
         // Auto-approve security
         if (ocrText.includes('Trust') || ocrText.includes('Security')) {
-          console.log(`[CC-${sessionId}] 🔓 Sending security approval...`);
+          console.log(`[CC-${sessionId}] 🔓 Approving project access...`);
           proc.stdin.write('1\n');
           await new Promise(r => setTimeout(r, 300));
           proc.stdin.write('\n');
@@ -171,21 +211,23 @@ async function launch(projectPath, options = {}) {
         
         clearInterval(checkReady);
         session.sessionReady = true;
+        session.authenticated = true;
         session.lastScreenshot = screenshotPath;
         session.lastOcrText = ocrText;
         resolve();
-      } else if (attempts % 5 === 0) {
-        console.log(`[CC-${sessionId}] Waiting for UI... (${(attempts * 0.5).toFixed(1)}s)`);
+      } else if (attempts % 10 === 0) {
+        console.log(`[CC-${sessionId}] Still loading... (${(attempts * 0.5).toFixed(1)}s)`);
       }
     }, 500);
 
-    // Timeout after 30 seconds
+    // Timeout after 60 seconds
     setTimeout(() => {
       clearInterval(checkReady);
       session.sessionReady = true;
-      console.log(`[CC-${sessionId}] ⏱️ Startup timeout, proceeding anyway`);
+      session.authenticated = true;
+      console.log(`[CC-${sessionId}] Startup timeout, proceeding`);
       resolve();
-    }, 30000);
+    }, 60000);
   });
 
   sessions.set(sessionId, session);
