@@ -1,313 +1,133 @@
-# Claude Code Control — Skill for OpenClaw
+# claude-code-control 🤖🖥️
 
-**Let autonomous agents control Claude Code without manual intervention.**
+**Programmatic control of Claude Code via visible Terminal.app windows.**
 
-This skill provides a clean Node.js API for agents to:
-- Launch Claude Code instances
-- Execute commands (tests, builds, code generation)
-- Parse structured output
-- Chain operations autonomously
-- Handle long-running tasks
+Launch Claude Code, send commands, capture screenshots, and record sessions — all from Node.js. Your AI agent can drive Claude Code like a human would, and you can watch it happen in real time.
 
----
+![macOS](https://img.shields.io/badge/macOS-only-blue) ![Node.js](https://img.shields.io/badge/node-%3E%3D18-green) ![License](https://img.shields.io/badge/license-MIT-yellow)
 
-## Why This Exists
+## What It Does
 
-Claude Code is powerful, but interactive. Agents get stuck at prompts:
-- "Is this a project you trust?" ❌
-- "Not logged in · Run /login" ❌
-- Waiting for command output ❌
-
-This skill **abstracts all that away**. Agents send clean commands, get clean JSON back.
-
----
+- 🚀 **Launch** Claude Code in a real, visible Terminal.app window
+- ⌨️ **Send commands** by typing into the terminal (AppleScript keystrokes)
+- 📸 **Capture screenshots** of just the Terminal window (not the whole screen)
+- 🔐 **Handle security prompts** (trust folder, login flow)
+- 💾 **Record sessions** with timestamped command/screenshot logs
+- 🎯 **Window-focused capture** — gets Terminal bounds via AppleScript, crops automatically
 
 ## Quick Start
 
-### Install
-
 ```bash
-npm install
+npm install claude-code-control
 ```
 
-### Usage
-
 ```javascript
-const cc = require('./index');
+const cc = require('claude-code-control');
 
-// Launch Claude Code
-const session = await cc.launch('/path/to/project');
+// Launch Claude Code in a visible terminal
+const session = await cc.launch('/path/to/your/project');
 
-// Send a command
-const result = await cc.send(session, 'run pytest tests/ -v');
+// Send a command — you'll see it typed on screen
+const result = await cc.send(session, 'write a hello world in Python');
 
-// Get results
-console.log(result.parsed.tests_passed); // 33
-console.log(result.parsed.tests_failed);  // 0
+// Screenshot is captured automatically
+console.log('Screenshot:', result.screenshot);
 
-// Close gracefully
+// Save the full session recording
+await cc.saveSession(session, './my-session.json');
+
+// Clean up
 await cc.close(session);
 ```
 
-### Run Example
+## Requirements
 
-```bash
-# Test with Atlas Dashboard
-ATLAS_PATH=/path/to/atlas-dashboard-mvp node examples/run-atlas-tests.js
-```
-
-Expected output:
-```
-🚀 Running Atlas Dashboard tests via Claude Code
-📂 Starting Claude Code at /path/to/atlas-dashboard-mvp
-🧪 Running pytest...
-
-📊 Test Results:
-{
-  "tests_passed": 33,
-  "tests_failed": 0,
-  "tests_skipped": 0,
-  "warnings": 16,
-  "duration_seconds": 1.54
-}
-
-✅ All 33 tests passed!
-```
-
----
+- **macOS** (uses Terminal.app + AppleScript)
+- **Node.js 18+**
+- **Claude Code** installed (`npm install -g @anthropic-ai/claude-code`)
+- **Accessibility permissions** for Terminal.app and Script Editor:
+  - System Settings → Privacy & Security → Accessibility → enable both
 
 ## API
 
-### `launch(projectPath, options)`
+### `launch(projectPath, options?)`
+Opens a new Terminal.app window, `cd`s to the project, and runs `claude code`.
+Returns a session ID.
 
-Start a Claude Code instance.
+### `send(sessionId, command, waitSeconds?)`
+Types a command into the terminal and waits for it to process.
+Returns `{ sessionId, command, duration_ms, screenshot, status }`.
 
-**Args:**
-- `projectPath` (string) — Working directory
-- `options` (object, optional) — Config overrides
+### `verifyScreen(sessionId, description)`
+Takes a screenshot for visual verification.
+Returns `{ verified, screenshot, description }`.
 
-**Returns:** Promise<sessionId>
+### `approveSecurity(sessionId)`
+Handles the "trust this folder" prompt by pressing `1` + Enter.
 
-**Example:**
-```javascript
-const sessionId = await cc.launch('/home/user/my-project');
-```
+### `handleLogin(sessionId)`
+Sends `/login` to trigger the auth flow.
 
----
+### `saveSession(sessionId, filepath)`
+Writes the full session log (commands, screenshots, timing) to a JSON file.
 
-### `send(sessionId, command, timeoutSeconds)`
+### `close(sessionId)` / `closeAll()`
+Gracefully exits Claude Code and closes the session.
 
-Send a command to Claude Code.
+### Utilities
+- `takeScreenshot(outputPath?)` — capture Terminal window
+- `typeText(text)` — type into frontmost app
+- `pressEnter()` / `pressKey(keyName)` — send keystrokes
+- `focusTerminal()` — bring Terminal.app to front
+- `getTerminalWindowBounds()` — get window position/size
 
-**Args:**
-- `sessionId` (string) — From `launch()`
-- `command` (string) — Shell command to run
-- `timeoutSeconds` (number, optional) — Timeout (default: 300)
+## Session Recording Format
 
-**Returns:** Promise<Result>
-
-**Result object:**
 ```json
 {
-  "sessionId": "1",
-  "command": "pytest tests/ -v",
-  "status": "success",
-  "output": "...",
-  "duration_ms": 1245,
-  "parsed": {
-    "tests_passed": 33,
-    "tests_failed": 0,
-    "warnings": 16
-  },
-  "errors": []
+  "sessionId": 1,
+  "path": "/your/project",
+  "duration_ms": 43689,
+  "commands_sent": 3,
+  "log": [
+    { "type": "screenshot", "timestamp": 1234567890, "path": "/tmp/cc-screenshot-xxx.png", "event": "launch" },
+    { "type": "command", "timestamp": 1234567900, "command": "echo hello" },
+    { "type": "response", "timestamp": 1234567910, "duration_ms": 10000, "screenshot": "/tmp/cc-screenshot-yyy.png" }
+  ]
 }
 ```
 
-**Example:**
-```javascript
-const result = await cc.send(sessionId, 'run npm test');
-if (result.parsed.tests_failed === 0) {
-  console.log('✅ All tests passed');
-}
-```
+## Use Cases
 
----
+- **AI-to-AI orchestration** — have one agent drive Claude Code to build things
+- **Automated testing** — script Claude Code interactions for CI demos
+- **Session recording** — capture exactly what Claude Code does for review
+- **Teaching/demos** — show Claude Code solving problems with visual proof
 
-### `getStatus(sessionId)`
+## Pro Features (Coming Soon) 🔒
 
-Check if Claude Code is still running.
+- **🎬 Video recording** — full screen recordings of Claude Code sessions (not just screenshots)
+- **🤖 Multi-agent orchestration** — run multiple Claude Code instances across terminals simultaneously
+- **📊 Session analytics** — token usage, command timing, success rate tracking
+- **🔄 Session replay** — replay recorded sessions in real time
+- **🌐 Remote control** — drive Claude Code on remote machines via SSH
 
-**Returns:** Object or null
+Interested? Star this repo and watch for updates, or reach out: [@ExecutionLoop](https://x.com/ExecutionLoop)
 
-```javascript
-const status = cc.getStatus(sessionId);
-console.log(status.uptime_ms);     // How long it's been running
-console.log(status.commands_sent); // How many commands sent
-console.log(status.running);       // true/false
-```
+## OpenClaw Skill
 
----
+This works as an [OpenClaw](https://openclaw.ai) skill:
 
-### `close(sessionId)`
-
-Gracefully shut down Claude Code.
-
-**Example:**
-```javascript
-await cc.close(sessionId);
-```
-
----
-
-### `closeAll()`
-
-Close all active sessions.
-
-```javascript
-await cc.closeAll();
-```
-
----
-
-## Supported Commands
-
-**Testing:**
-```javascript
-await cc.send(sessionId, 'run pytest tests/ -v');
-await cc.send(sessionId, 'run npm test');
-await cc.send(sessionId, 'run cargo test');
-```
-
-**Building:**
-```javascript
-await cc.send(sessionId, 'run npm run build');
-await cc.send(sessionId, 'run go build ./...');
-await cc.send(sessionId, 'run python setup.py build');
-```
-
-**Code Generation:**
-```javascript
-await cc.send(sessionId, 'create src/feature.js\n... code here ...');
-await cc.send(sessionId, 'edit src/feature.js\n... changes ...');
-```
-
-**Debugging:**
-```javascript
-await cc.send(sessionId, 'debug src/main.py');
-```
-
----
-
-## Real-World Example: CI/CD Pipeline
-
-```javascript
-const cc = require('./index');
-
-async function ciPipeline(projectPath) {
-  const session = await cc.launch(projectPath);
-
-  try {
-    // 1. Run tests
-    console.log('Testing...');
-    const tests = await cc.send(session, 'run pytest tests/ -v');
-    if (tests.parsed.tests_failed > 0) {
-      throw new Error('Tests failed');
-    }
-
-    // 2. Build
-    console.log('Building...');
-    const build = await cc.send(session, 'run npm run build');
-    if (build.status !== 'success') {
-      throw new Error('Build failed');
-    }
-
-    // 3. Lint
-    console.log('Linting...');
-    const lint = await cc.send(session, 'run npm run lint');
-
-    // 4. Deploy
-    console.log('Deploying...');
-    await cc.send(session, 'run npm run deploy');
-
-    console.log('✅ Pipeline succeeded');
-    return true;
-  } catch (err) {
-    console.error('❌ Pipeline failed:', err.message);
-    return false;
-  } finally {
-    await cc.close(session);
-  }
-}
-```
-
----
-
-## Performance
-
-- **Startup:** ~500ms (Claude Code init)
-- **Per-command:** ~200-500ms (vs 5-10k tokens for manual agent interaction)
-- **Memory:** ~50MB per session
-- **Token cost:** Minimal (mostly stdout parsing)
-
----
-
-## Limitations
-
-1. **Not interactive** — One-shot commands only (no REPL)
-2. **File size limit** — 10MB per file read/write
-3. **Requires Claude Code** — Must be installed (`which claude`)
-4. **ANSI stripping** — Color codes removed from output
-5. **Process-level** — No fine-grained permission model
-
----
-
-## Troubleshooting
-
-### "Claude Code not found"
 ```bash
-which claude
-# If empty:
-brew install anthropic-cli
+clawhub install claude-code-control
 ```
 
-### "Connection timeout"
-Increase timeout:
-```javascript
-await cc.send(sessionId, 'run long-running-command', 600);
-```
+## Built by
 
-### "Session killed unexpectedly"
-Check system resources (memory, disk space). Sessions auto-cleanup on exit.
+[Efficacy Labs](https://x.com/ExecutionLoop) — AI agents that actually do things.
 
----
-
-## Security
-
-⚠️ This skill should only be used with **trusted projects**. Claude Code will execute arbitrary commands.
-
-- Never run on untrusted code
-- Validate project paths before `launch()`
-- Use in isolated environments (containers, VMs)
-- Audit command history: `cc.getStatus(sessionId)`
-
----
-
-## Contributing
-
-Found a bug? Have a feature request?
-
-Open an issue: [GitHub Issues](https://github.com/efficacy-labs/claude-code-control/issues)
-
----
+Built by Atlas 🗺️, an AI agent on a 30-day challenge to prove its worth.
 
 ## License
 
 MIT
-
----
-
-## Author
-
-Built by **Efficacy Labs** for the OpenClaw ecosystem.
-
-[Learn more →](https://efficacy.ai)

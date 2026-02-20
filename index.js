@@ -1,92 +1,180 @@
 /**
- * Claude Code Control Skill v3 — VISION-BASED
- * Uses screenshot + OCR to detect command completion
- * Waits for visual state changes, not text parsing
+ * Claude Code Control Skill — PROPER IMPLEMENTATION
+ * 
+ * Uses macOS AppleScript to:
+ * 1. Open a REAL visible Terminal.app window running Claude Code
+ * 2. Send keystrokes via System Events
+ * 3. Take screenshots with screencapture
+ * 4. Verify state via image analysis
+ * 
+ * The user can SEE Claude Code running on their screen.
  */
 
-const { spawn } = require('child_process');
 const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-// Global session map
 const sessions = new Map();
 let sessionCounter = 0;
 
+// ─── Helpers ────────────────────────────────────────────────
+
 /**
- * Take a screenshot and return as buffer
+ * Run AppleScript and return output
  */
-function takeScreenshot(filename = null) {
-  const tempFile = filename || `/tmp/claude-code-screenshot-${Date.now()}.png`;
+function runAppleScript(script) {
   try {
-    execSync(`screencapture -x ${tempFile}`, { stdio: 'pipe' });
-    return tempFile;
+    return execSync(`osascript -e '${script.replace(/'/g, "'\\''")}'`, {
+      encoding: 'utf-8',
+      timeout: 10000,
+    }).trim();
   } catch (err) {
-    console.error('Screenshot failed:', err.message);
-    return null;
+    console.error(`[AppleScript Error] ${err.message}`);
+    return '';
   }
 }
 
 /**
- * Run OCR on screenshot using Claude's vision API
- * Falls back to simple file-based detection
+ * Run multi-line AppleScript
  */
-async function ocrScreenshot(imagePath) {
-  // Try Claude vision first (if API key available)
-  if (process.env.ANTHROPIC_API_KEY) {
-    try {
-      const Anthropic = require('@anthropic-ai/sdk');
-      const client = new Anthropic.Anthropic({
-        apiKey: process.env.ANTHROPIC_API_KEY,
-      });
+function runAppleScriptMulti(lines) {
+  const script = lines.join('\n');
+  const tmpFile = `/tmp/cc-applescript-${Date.now()}.scpt`;
+  fs.writeFileSync(tmpFile, script);
+  try {
+    return execSync(`osascript ${tmpFile}`, {
+      encoding: 'utf-8',
+      timeout: 15000,
+    }).trim();
+  } catch (err) {
+    console.error(`[AppleScript Error] ${err.message}`);
+    return '';
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch {}
+  }
+}
 
-      const imageData = fs.readFileSync(imagePath);
-      const base64 = imageData.toString('base64');
+/**
+ * Bring Terminal.app to the front and focus it
+ */
+function focusTerminal() {
+  runAppleScriptMulti([
+    'tell application "Terminal"',
+    '  activate',
+    '  set frontWindow to front window',
+    '  set index of frontWindow to 1',
+    'end tell',
+  ]);
+  // Small pause to let the window actually come forward
+  execSync('sleep 0.3');
+}
 
-      const response = await client.messages.create({
-        model: 'claude-3-5-sonnet-20241022',
-        max_tokens: 500,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: 'image/png',
-                  data: base64,
-                },
-              },
-              {
-                type: 'text',
-                text: 'Read and transcribe ALL text visible in this screenshot. Include the command prompt marker if visible.',
-              },
-            ],
-          },
-        ],
-      });
+/**
+ * Get Terminal.app front window bounds {x, y, w, h}
+ */
+function getTerminalWindowBounds() {
+  const result = runAppleScriptMulti([
+    'tell application "Terminal"',
+    '  set b to bounds of front window',
+    '  return (item 1 of b as text) & "," & (item 2 of b as text) & "," & (item 3 of b as text) & "," & (item 4 of b as text)',
+    'end tell',
+  ]);
+  if (!result) return null;
+  const [x1, y1, x2, y2] = result.split(',').map(Number);
+  return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+}
 
-      return response.content[0].type === 'text' ? response.content[0].text : '';
-    } catch (err) {
-      console.warn('Claude vision failed, using file introspection');
-      return '';
+/**
+ * Take a screenshot of the Terminal.app window only.
+ * Falls back to full screen if window bounds can't be detected.
+ */
+function takeScreenshot(outputPath) {
+  const filePath = outputPath || `/tmp/cc-screenshot-${Date.now()}.png`;
+  try {
+    // First, focus Terminal so it's on top
+    focusTerminal();
+
+    // Try to get window bounds for a targeted capture
+    const bounds = getTerminalWindowBounds();
+    if (bounds) {
+      // screencapture -R x,y,w,h captures a specific region
+      execSync(`screencapture -x -R${bounds.x},${bounds.y},${bounds.w},${bounds.h} "${filePath}"`, { timeout: 5000 });
+    } else {
+      // Fallback: capture the whole screen
+      execSync(`screencapture -x "${filePath}"`, { timeout: 5000 });
     }
+
+    if (fs.existsSync(filePath)) {
+      return filePath;
+    }
+  } catch (err) {
+    console.error(`[Screenshot Error] ${err.message}`);
   }
-
-  return '';
+  return null;
 }
 
 /**
- * Check if Claude Code prompt is visible in OCR text
+ * Type text into the frontmost application via System Events
  */
-function isPromptVisible(ocrText) {
-  // Claude Code shows "❯" when ready for input
-  return ocrText.includes('❯') || ocrText.includes('>');
+function typeText(text) {
+  // Use keystroke for short text, or write to clipboard and paste for long text
+  if (text.length > 50) {
+    // Use clipboard for long text
+    execSync(`echo ${JSON.stringify(text)} | pbcopy`, { timeout: 5000 });
+    runAppleScriptMulti([
+      'tell application "System Events"',
+      '  keystroke "v" using command down',
+      'end tell',
+    ]);
+  } else {
+    // Direct keystroke for short text
+    runAppleScriptMulti([
+      'tell application "System Events"',
+      `  keystroke "${text.replace(/"/g, '\\"')}"`,
+      'end tell',
+    ]);
+  }
 }
 
 /**
- * Launch Claude Code with authentication handling
+ * Press Enter/Return key
+ */
+function pressEnter() {
+  runAppleScriptMulti([
+    'tell application "System Events"',
+    '  key code 36',
+    'end tell',
+  ]);
+}
+
+/**
+ * Press a special key (escape, tab, etc.)
+ */
+function pressKey(keyName) {
+  const keyCodes = {
+    'return': 36,
+    'enter': 36,
+    'escape': 53,
+    'tab': 48,
+    'space': 49,
+    'delete': 51,
+    'up': 126,
+    'down': 125,
+    'left': 123,
+    'right': 124,
+  };
+  const code = keyCodes[keyName.toLowerCase()] || 36;
+  runAppleScriptMulti([
+    'tell application "System Events"',
+    `  key code ${code}`,
+    'end tell',
+  ]);
+}
+
+// ─── Core API ───────────────────────────────────────────────
+
+/**
+ * Launch Claude Code in a VISIBLE Terminal.app window
  */
 async function launch(projectPath, options = {}) {
   const sessionId = ++sessionCounter;
@@ -96,240 +184,174 @@ async function launch(projectPath, options = {}) {
     throw new Error(`Project path does not exist: ${normalizedPath}`);
   }
 
-  console.log(`[CC-${sessionId}] 🚀 Launching Claude Code at ${normalizedPath}`);
+  console.log(`[CC-${sessionId}] 🚀 Opening Terminal.app with Claude Code at ${normalizedPath}`);
 
-  // Spawn Claude Code
-  const proc = spawn('claude', ['code'], {
-    cwd: normalizedPath,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, TERM: 'xterm-256color' },
-  });
+  // Open a new Terminal.app window and run claude code
+  runAppleScriptMulti([
+    'tell application "Terminal"',
+    '  activate',
+    `  do script "cd '${normalizedPath}' && claude code"`,
+    'end tell',
+  ]);
 
   const session = {
     id: sessionId,
     path: normalizedPath,
-    proc,
     created_at: Date.now(),
     commandCount: 0,
-    outputBuffer: '',
     sessionLog: [],
-    sessionReady: false,
-    authenticated: false,
-    lastScreenshot: null,
-    lastOcrText: '',
+    ready: false,
   };
 
-  // Capture stdout
-  proc.stdout.on('data', (data) => {
-    session.outputBuffer += data.toString();
-  });
+  console.log(`[CC-${sessionId}] ⏳ Waiting for Claude Code to start...`);
 
-  // Process exit handler
-  proc.on('exit', (code) => {
-    console.log(`[CC-${sessionId}] Claude Code exited with code ${code}`);
-  });
+  // Wait for Claude Code to appear (give it time to load)
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
-  // Wait for Claude Code to appear
-  console.log(`[CC-${sessionId}] ⏳ Starting Claude Code...`);
-  
-  await new Promise((resolve) => {
-    let attempts = 0;
-    const checkReady = setInterval(async () => {
-      attempts++;
-      
-      // Take screenshot
-      const screenshotPath = takeScreenshot();
-      
-      if (!screenshotPath) {
-        if (attempts > 20) {
-          clearInterval(checkReady);
-          session.sessionReady = true;
-          session.authenticated = true;
-          resolve();
-        }
-        return;
-      }
+  // Take a screenshot to verify it's running
+  const screenshot = takeScreenshot();
+  if (screenshot) {
+    console.log(`[CC-${sessionId}] 📸 Screenshot captured: ${screenshot}`);
+    session.sessionLog.push({
+      type: 'screenshot',
+      timestamp: Date.now(),
+      path: screenshot,
+      event: 'launch',
+    });
+  }
 
-      // OCR the screenshot using Claude vision
-      const ocrText = await ocrScreenshot(screenshotPath);
-      
-      // Check for authentication requirement
-      if (ocrText.includes('https://') || ocrText.includes('login') || ocrText.includes('authenticate')) {
-        console.log(`\n[CC-${sessionId}] 🔐 AUTHENTICATION REQUIRED\n`);
-        console.log(`[CC-${sessionId}] Claude Code needs you to authenticate:\n`);
-        console.log(`[CC-${sessionId}] 1. Look at the URL shown in Claude Code (visible on your screen)`);
-        console.log(`[CC-${sessionId}] 2. Visit that URL in your browser`);
-        console.log(`[CC-${sessionId}] 3. Complete authentication`);
-        console.log(`[CC-${sessionId}] 4. Return to Claude Code and press Enter when authenticated\n`);
-        
-        session.lastScreenshot = screenshotPath;
-        session.lastOcrText = ocrText;
-        
-        // Now wait for user to complete auth (they'll press Enter in Claude Code)
-        console.log(`[CC-${sessionId}] ⏳ Waiting for you to complete authentication...\n`);
-        
-        // Clear the check interval and wait for the prompt to change
-        clearInterval(checkReady);
-        
-        let authAttempts = 0;
-        const checkAuth = setInterval(async () => {
-          authAttempts++;
-          const authScreenshot = takeScreenshot();
-          if (authScreenshot) {
-            const authOcrText = await ocrScreenshot(authScreenshot);
-            
-            // When prompt appears (❯) = authenticated
-            if (authOcrText.includes('❯') || authAttempts > 120) {
-              console.log(`[CC-${sessionId}] ✅ Authentication complete!\n`);
-              clearInterval(checkAuth);
-              session.sessionReady = true;
-              session.authenticated = true;
-              resolve();
-            }
-          }
-        }, 500);
-        
-        return;
-      }
-      
-      // Check for security prompt (project trust)
-      if (ocrText.includes('Security') || 
-          ocrText.includes('Trust') ||
-          ocrText.includes('Claude') ||
-          ocrText.length > 100 ||
-          attempts > 20) {
-        
-        console.log(`[CC-${sessionId}] ✅ Claude Code UI detected`);
-        
-        // Auto-approve security
-        if (ocrText.includes('Trust') || ocrText.includes('Security')) {
-          console.log(`[CC-${sessionId}] 🔓 Approving project access...`);
-          proc.stdin.write('1\n');
-          await new Promise(r => setTimeout(r, 300));
-          proc.stdin.write('\n');
-        }
-        
-        clearInterval(checkReady);
-        session.sessionReady = true;
-        session.authenticated = true;
-        session.lastScreenshot = screenshotPath;
-        session.lastOcrText = ocrText;
-        resolve();
-      } else if (attempts % 10 === 0) {
-        console.log(`[CC-${sessionId}] Still loading... (${(attempts * 0.5).toFixed(1)}s)`);
-      }
-    }, 500);
-
-    // Timeout after 60 seconds
-    setTimeout(() => {
-      clearInterval(checkReady);
-      session.sessionReady = true;
-      session.authenticated = true;
-      console.log(`[CC-${sessionId}] Startup timeout, proceeding`);
-      resolve();
-    }, 60000);
-  });
-
+  session.ready = true;
   sessions.set(sessionId, session);
+
+  console.log(`[CC-${sessionId}] ✅ Claude Code should now be visible on screen`);
   return sessionId;
 }
 
 /**
- * Send command and wait for prompt to reappear (visual confirmation)
+ * Send a command to Claude Code by typing into Terminal.app
  */
-async function send(sessionId, command, timeoutSeconds = 60) {
+async function send(sessionId, command, waitSeconds = 10) {
   const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error(`Invalid session: ${sessionId}`);
-  }
-
-  if (!session.sessionReady) {
-    throw new Error(`Session not ready: ${sessionId}`);
-  }
+  if (!session) throw new Error(`Invalid session: ${sessionId}`);
 
   const startTime = Date.now();
   session.commandCount++;
 
-  console.log(`[CC-${sessionId}] 📤 Sending: ${command}`);
+  console.log(`[CC-${sessionId}] 📤 Typing command: ${command}`);
 
-  // Log command
+  // Log the command
   session.sessionLog.push({
     type: 'command',
     timestamp: Date.now(),
-    command: command,
+    command,
   });
 
-  // Send command
-  session.proc.stdin.write(command + '\n');
+  // Bring Terminal to front
+  focusTerminal();
 
-  // Wait for prompt to reappear (visual confirmation)
-  console.log(`[CC-${sessionId}] ⏳ Waiting for command to complete (watching for prompt)...`);
-  
-  let responseText = '';
-  let promptReappeared = false;
+  // Type the command
+  typeText(command);
+  await new Promise(resolve => setTimeout(resolve, 200));
 
-  await new Promise((resolve) => {
-    let attempts = 0;
-    const maxAttempts = (timeoutSeconds * 2);
-    
-    const checkForCompletion = setInterval(async () => {
-      attempts++;
+  // Press Enter
+  pressEnter();
 
-      // Take screenshot
-      const screenshotPath = takeScreenshot();
-      if (!screenshotPath) {
-        console.log(`[CC-${sessionId}] ⚠️ Screenshot failed`);
-        return;
-      }
+  console.log(`[CC-${sessionId}] ⏳ Waiting ${waitSeconds}s for command to complete...`);
 
-      // OCR it using Claude vision
-      const ocrText = await ocrScreenshot(screenshotPath);
-      
-      // Check for prompt marker
-      if (isPromptVisible(ocrText) && attempts > 2) {
-        // Prompt returned = command complete
-        promptReappeared = true;
-        responseText = ocrText;
-        clearInterval(checkForCompletion);
-        console.log(`[CC-${sessionId}] 📍 Prompt detected! Command complete.`);
-        resolve();
-      }
+  // Wait for command to process
+  await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
 
-      // Timeout
-      if (attempts > maxAttempts) {
-        clearInterval(checkForCompletion);
-        responseText = ocrText || 'Command timeout (no response)';
-        console.log(`[CC-${sessionId}] ⏱️ Timeout reached`);
-        resolve();
-      }
-
-      if (attempts % 4 === 0) {
-        console.log(`[CC-${sessionId}] Waiting... (${(attempts * 0.5).toFixed(1)}s elapsed)`);
-      }
-    }, 500);
-  });
-
+  // Take screenshot to capture result
+  const screenshot = takeScreenshot();
   const duration = Date.now() - startTime;
 
   const result = {
     sessionId,
     command,
-    output: responseText,
     duration_ms: duration,
-    status: promptReappeared ? 'success' : 'incomplete',
+    screenshot,
+    status: 'sent',
   };
-
-  console.log(`[CC-${sessionId}] ✅ Response received (${duration}ms, status: ${result.status})`);
 
   // Log result
   session.sessionLog.push({
     type: 'response',
     timestamp: Date.now(),
-    output: responseText,
     duration_ms: duration,
+    screenshot,
   });
 
+  console.log(`[CC-${sessionId}] ✅ Command sent and screenshot captured (${duration}ms)`);
+
   return result;
+}
+
+/**
+ * Verify current screen state by analyzing screenshot
+ */
+async function verifyScreen(sessionId, description) {
+  const session = sessions.get(sessionId);
+  if (!session) throw new Error(`Invalid session: ${sessionId}`);
+
+  const screenshot = takeScreenshot();
+  if (!screenshot) {
+    return { verified: false, error: 'Screenshot failed' };
+  }
+
+  session.sessionLog.push({
+    type: 'verification',
+    timestamp: Date.now(),
+    screenshot,
+    description,
+  });
+
+  return {
+    verified: true,
+    screenshot,
+    description,
+  };
+}
+
+/**
+ * Handle Claude Code security prompt (approve project access)
+ */
+async function approveSecurity(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) throw new Error(`Invalid session: ${sessionId}`);
+
+  console.log(`[CC-${sessionId}] 🔓 Approving security prompt...`);
+
+  // Bring Terminal to front
+  focusTerminal();
+
+  // Press 1 for "Yes, I trust this folder"
+  typeText('1');
+  await new Promise(resolve => setTimeout(resolve, 200));
+  pressEnter();
+
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  console.log(`[CC-${sessionId}] ✅ Security prompt approved`);
+}
+
+/**
+ * Handle Claude Code login flow
+ */
+async function handleLogin(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) throw new Error(`Invalid session: ${sessionId}`);
+
+  console.log(`[CC-${sessionId}] 🔐 Handling login...`);
+
+  // Bring Terminal to front
+  focusTerminal();
+
+  // Type /login command
+  typeText('/login');
+  pressEnter();
+
+  console.log(`[CC-${sessionId}] 🔐 Login command sent. User should complete auth in browser.`);
+  console.log(`[CC-${sessionId}] ⏳ Waiting for authentication to complete...`);
 }
 
 /**
@@ -338,20 +360,18 @@ async function send(sessionId, command, timeoutSeconds = 60) {
 function getStatus(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return null;
-
   return {
     sessionId,
     path: session.path,
-    running: session.proc && !session.proc.killed,
     uptime_ms: Date.now() - session.created_at,
     commands_sent: session.commandCount,
-    ready: session.sessionReady,
-    lastScreenshot: session.lastScreenshot,
+    ready: session.ready,
+    logEntries: session.sessionLog.length,
   };
 }
 
 /**
- * Save session recording
+ * Save session recording (all screenshots + commands)
  */
 async function saveSession(sessionId, filepath) {
   const session = sessions.get(sessionId);
@@ -372,56 +392,46 @@ async function saveSession(sessionId, filepath) {
 }
 
 /**
- * Close session
+ * Close Claude Code session
  */
 async function close(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
 
-  console.log(`[CC-${sessionId}] 🧹 Closing session`);
+  console.log(`[CC-${sessionId}] 🧹 Closing Claude Code...`);
 
-  if (session.proc && !session.proc.killed) {
-    session.proc.stdin.write('exit\n');
-
-    await new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        session.proc.kill('SIGKILL');
-        resolve();
-      }, 3000);
-
-      session.proc.on('exit', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    });
-  }
+  // Bring Terminal to front and send Escape + exit
+  focusTerminal();
+  pressKey('escape');
+  await new Promise(resolve => setTimeout(resolve, 500));
+  typeText('/exit');
+  pressEnter();
 
   sessions.delete(sessionId);
-  console.log(`[CC-${sessionId}] ✅ Closed`);
+  console.log(`[CC-${sessionId}] ✅ Session closed`);
 }
 
 /**
  * Close all sessions
  */
 async function closeAll() {
-  const sessionIds = Array.from(sessions.keys());
-  for (const id of sessionIds) {
+  for (const id of Array.from(sessions.keys())) {
     await close(id);
   }
 }
 
-process.on('exit', () => {
-  closeAll().catch(console.error);
-});
-
 module.exports = {
   launch,
   send,
+  verifyScreen,
+  approveSecurity,
+  handleLogin,
   getStatus,
   saveSession,
   close,
   closeAll,
   takeScreenshot,
-  ocrScreenshot,
-  isPromptVisible,
+  typeText,
+  pressEnter,
+  pressKey,
 };

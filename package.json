@@ -1,7 +1,7 @@
 {
   "name": "claude-code-control",
-  "version": "1.0.0",
-  "description": "Autonomous agent interface for Claude Code — control code execution, run tests, and automate development workflows without manual intervention.",
+  "version": "1.1.0",
+  "description": "Programmatic control of Claude Code via visible Terminal.app windows. Launch, send commands, capture screenshots, and record sessions from Node.js.",
   "main": "index.js",
   "keywords": [
     "claude-code",
@@ -17,12 +17,11 @@
   "bin": {
     "claude-code-control": "cli.js"
   },
+  "os": ["darwin"],
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=18.0.0"
   },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.30.0"
-  },
+  "dependencies": {},
   "scripts": {
     "test": "node test.js",
     "example": "node examples/run-tests.js"
