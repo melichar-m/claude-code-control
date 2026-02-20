@@ -1,18 +1,3 @@
----
-name: claude-code-control
-description: Programmatic control of Claude Code via visible Terminal.app windows. Launch, send commands, capture screenshots, and record sessions from Node.js. macOS only.
-metadata:
-  openclaw:
-    requires:
-      os: darwin
-      bins: [node]
-    install:
-      - id: node-deps
-        kind: shell
-        command: "cd {{skillDir}} && npm install"
-        label: "Install dependencies"
----
-
 # Claude Code Control
 
 Control Claude Code programmatically through visible Terminal.app windows on macOS.
