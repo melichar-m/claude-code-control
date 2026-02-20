@@ -1,215 +1,74 @@
-# Claude Code Control Skill
-
-**Execute Claude Code commands autonomously without interactive prompts or manual intervention.**
-
-Agents can now control Claude Code instances, send commands, chain operations, and parse output — all programmatically.
-
-## What It Does
-
-- ✅ Launch Claude Code in background with auto-approval
-- ✅ Send commands (exec, file reads/writes, shell)
-- ✅ Skip /login and security prompts automatically
-- ✅ Capture clean output (strip ANSI, format JSON)
-- ✅ Chain multiple commands sequentially
-- ✅ Handle long-running tasks (code generation, testing, debugging)
-
-## Use Cases
-
-1. **Agent-to-Agent Automation** — Agent A spawns Claude Code to solve a problem autonomously
-2. **Complex Code Tasks** — Debugging, refactoring, architecture decisions
-3. **Testing & Validation** — Run test suites, get structured results
-4. **Build Pipelines** — Compile, package, deploy code changes
-5. **Interactive Problem-Solving** — Back-and-forth iterations without human input
-
-## Quick Example
-
-```javascript
-const cc = require('./claude-code-control');
-
-// Start Claude Code
-const session = await cc.launch('/path/to/project');
-
-// Send a command
-const result = await cc.send(session, 'run pytest tests/ -v');
-
-// Get structured output
-console.log(result.status);        // 'success' or 'error'
-console.log(result.output);        // Clean command output
-console.log(result.testsPassed);   // Parsed from output
-```
-
-## Commands Supported
-
-- `run <command>` — Execute shell commands
-- `edit <file>` — Edit file (with context)
-- `create <file>` — Create new file with content
-- `read <file>` — Read file contents
-- `find <pattern>` — Search files
-- `test` — Run test suites
-- `build` — Compile/package code
-- `debug <file>` — Interactive debugging
-
-## Installation
-
-```bash
-npm install claude-code-control
-# or
-clawhub install claude-code-control
-```
-
-## Configuration
-
-Set in `~/.openclaw/config.yaml`:
-
-```yaml
-skills:
-  claude-code-control:
-    auto_approve: true
-    timeout_seconds: 300
-    max_retries: 3
-    cleanup_on_exit: true
-```
-
-## Output Format
-
-All responses are JSON:
-
-```json
-{
-  "status": "success",
-  "command": "pytest tests/ -v",
-  "output": "...",
-  "duration_ms": 1245,
-  "parsed": {
-    "tests_passed": 33,
-    "tests_failed": 0,
-    "warnings": 16
-  },
-  "errors": []
-}
-```
-
-## Token Efficiency
-
-- **~200-500 tokens** per command (vs 5-10k for manual agent interaction)
-- Useful for agents that need to iterate rapidly
-- Ideal for code generation, testing, deployment automation
-
-## Limitations
-
-- Requires Claude Code to be installed + authenticated
-- No support for interactive shell sessions (one-shot commands only)
-- ANSI codes stripped from output (clean text only)
-- File size limit: 10MB per file
-
-## Examples
-
-### Example 1: Run Tests Autonomously
-
-```javascript
-const cc = require('./claude-code-control');
-
-async function validateCode(projectPath) {
-  const session = await cc.launch(projectPath);
-  
-  const result = await cc.send(session, 'run pytest tests/ -v');
-  
-  if (result.parsed.tests_failed > 0) {
-    console.error(`${result.parsed.tests_failed} tests failed`);
-    return false;
-  }
-  
-  return true;
-}
-```
-
-### Example 2: Code Generation & Testing Loop
-
-```javascript
-async function generateAndTest(spec) {
-  const session = await cc.launch('/project');
-  
-  // Generate code
-  await cc.send(session, `create src/feature.py
-${spec}`);
-  
-  // Run tests
-  const result = await cc.send(session, 'run pytest tests/test_feature.py -v');
-  
-  // If tests fail, ask Claude Code to fix
-  if (result.parsed.tests_failed > 0) {
-    await cc.send(session, 'debug src/feature.py');
-  }
-  
-  return result;
-}
-```
-
-### Example 3: Deployment Pipeline
-
-```javascript
-async function deployPipeline() {
-  const session = await cc.launch('/app');
-  
-  // Build
-  await cc.send(session, 'run npm run build');
-  
-  // Test
-  const tests = await cc.send(session, 'run npm test');
-  if (tests.status !== 'success') throw new Error('Tests failed');
-  
-  // Package
-  await cc.send(session, 'build');
-  
-  // Deploy
-  await cc.send(session, 'run npm run deploy');
-  
-  console.log('✅ Deployed successfully');
-}
-```
-
-## Troubleshooting
-
-**"Claude Code not found in PATH"**
-```bash
-which claude
-# If empty, install: brew install anthropic-cli
-```
-
-**"Connection timeout"**
-- Increase `timeout_seconds` in config
-- Check Claude Code is running: `pgrep -f "claude code"`
-
-**"Command failed with no output"**
-- Check file permissions
-- Verify project path exists
-- Review logs: `tail -f ~/.openclaw/logs/claude-code-control.log`
-
-## API Reference
-
-### `launch(projectPath, options)`
-Start a Claude Code instance.
-- `projectPath` (string) — Working directory
-- `options` (object) — Optional config overrides
-- Returns: Session handle
-
-### `send(session, command, timeout)`
-Send command to running Claude Code.
-- `session` (handle) — From `launch()`
-- `command` (string) — Command to run
-- `timeout` (number, optional) — Override timeout
-- Returns: Promise<Result>
-
-### `close(session)`
-Gracefully shut down Claude Code.
-- `session` (handle)
-
-### `getStatus(session)`
-Check if Claude Code is still running.
-- Returns: `{ running: bool, uptime_seconds: number }`
-
+---
+name: claude-code-control
+description: Programmatic control of Claude Code via visible Terminal.app windows. Launch, send commands, capture screenshots, and record sessions from Node.js. macOS only.
+metadata:
+  openclaw:
+    requires:
+      os: darwin
+      bins: [node]
+    install:
+      - id: node-deps
+        kind: shell
+        command: "cd {{skillDir}} && npm install"
+        label: "Install dependencies"
 ---
 
-**Built for autonomous agents. Sold for $1. Used by everyone.**
+# Claude Code Control
 
-Join the OpenClaw ecosystem. [Learn more →](https://clawhub.com)
+Control Claude Code programmatically through visible Terminal.app windows on macOS.
+
+## How It Works
+
+Uses AppleScript to:
+1. Open Terminal.app and launch `claude code` in a project directory
+2. Type commands via System Events keystrokes
+3. Capture screenshots of just the Terminal window (not full screen)
+4. Record full sessions with timestamped logs
+
+## Requirements
+
+- macOS
+- Node.js 18+
+- Claude Code installed and authenticated
+- Accessibility permissions for Terminal.app + Script Editor (System Settings → Privacy & Security → Accessibility)
+
+## Usage
+
+```javascript
+const cc = require('./index');
+
+// Launch Claude Code visibly
+const session = await cc.launch('/path/to/project');
+
+// Send a command (types it + presses Enter)
+const result = await cc.send(session, 'write tests for app.py', 30);
+// result.screenshot → path to Terminal window screenshot
+
+// Save session recording
+await cc.saveSession(session, './recording.json');
+
+// Close
+await cc.close(session);
+```
+
+## API
+
+| Function | Description |
+|---|---|
+| `launch(path, opts?)` | Open Terminal + start Claude Code. Returns session ID |
+| `send(id, command, waitSec?)` | Type command, wait, screenshot. Returns `{screenshot, duration_ms}` |
+| `verifyScreen(id, desc)` | Take a verification screenshot |
+| `approveSecurity(id)` | Handle "trust this folder" prompt |
+| `handleLogin(id)` | Send `/login` command |
+| `saveSession(id, path)` | Save session log to JSON |
+| `close(id)` / `closeAll()` | Exit Claude Code gracefully |
+| `takeScreenshot(path?)` | Capture Terminal window |
+| `focusTerminal()` | Bring Terminal to front |
+
+## Pro Features (Coming Soon)
+
+- 🎬 Video recording of sessions
+- 🤖 Multi-agent / multi-terminal orchestration
+- 📊 Session analytics
+- 🔄 Session replay
+- 🌐 Remote control via SSH
