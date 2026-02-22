@@ -32,6 +32,12 @@ const PROMPT_PATTERNS = [
   { pattern: /\[y\/N\]/i, label: 'yn-prompt' },
 ];
 
+const IGNORE_PATTERNS = [
+  /compdef/i,
+  /zsh.*completion/i,
+  /insecure directories/i,
+];
+
 const ERROR_PATTERNS = [
   { pattern: /Error:/i, label: 'error' },
   { pattern: /FATAL/i, label: 'fatal-error' },
@@ -128,6 +134,9 @@ setInterval(() => {
       return;
     }
   }
+
+  // Skip harmless shell noise
+  if (IGNORE_PATTERNS.some(p => p.test(recent))) return;
 
   // Check for errors
   for (const { pattern, label } of ERROR_PATTERNS) {
