@@ -66,7 +66,7 @@ function focusTerminal() {
     'end tell',
   ]);
   // Small pause to let the window actually come forward
-  execSync('sleep 0.3');
+  execSync('sleep 1');
 }
 
 /**
@@ -98,7 +98,7 @@ function takeScreenshot(outputPath) {
     const bounds = getTerminalWindowBounds();
     if (bounds) {
       // screencapture -R x,y,w,h captures a specific region
-      execSync(`screencapture -x -R${bounds.x},${bounds.y},${bounds.w},${bounds.h} "${filePath}"`, { timeout: 5000 });
+      execSync(`screencapture -x -R "${bounds.x},${bounds.y},${bounds.w},${bounds.h}" "${filePath}"`, { timeout: 5000 });
     } else {
       // Fallback: capture the whole screen
       execSync(`screencapture -x "${filePath}"`, { timeout: 5000 });
@@ -431,6 +431,8 @@ module.exports = {
   close,
   closeAll,
   takeScreenshot,
+  focusTerminal,
+  getTerminalWindowBounds,
   typeText,
   pressEnter,
   pressKey,
